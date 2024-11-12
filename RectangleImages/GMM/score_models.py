@@ -11,16 +11,25 @@ from scipy.stats import norm
 from scipy import integrate
 
 class DiffusionModel:
-    """ Base class for diffusion models with score-based sampling.
-        Sampler evolves dx/dt = f(x,t) - g(t) * s(x,t) + sqrt{g(t)} * N(0,1) from T to 0,
-        given the forward process dx/dt = f(x,t) +  sqrt{g(t)} * N(0,1) from 0 to T.
-    """
-
     def __init__(self):
         self.T     = 1.
         self.eps   = 1e-3
 
-    def SDEsampler(self, score_net, latents, num_steps=100):
+    def SM_loss(self, net, x):
+        """The loss function for training score-based generative models.
+        Args:
+            net: A PyTorch model of time-dependent score-based model
+            x: A mini-batch of training data
+        """
+        random_t = torch.rand(x.shape[0], device=x.device) * (self.T - self.eps) + self.eps  
+        z = torch.randn_like(x)
+        mean = self.marginal_prob_mean(random_t)
+        std  = self.marginal_prob_std(random_t)
+        perturbed_x = x * mean[:, None] + z * std[:, None]
+        score = net(perturbed_x, random_t)
+        return torch.sum((score * std[:, None] + z)**2, dim=(1))
+
+    def sampler(self, score_net, latents, num_steps=100):
         batch_size = latents.shape[0]
 
         # define initial samples
@@ -48,7 +57,7 @@ class DiffusionModel:
     def ODEsampler(self, score_net, latents, err_tol=1e-5):
         batch_size = latents.shape[0]
 
-        # extract device
+        # extract devicev
         device=latents.device
         
         # define initial samples
@@ -70,14 +79,12 @@ class DiffusionModel:
             rhs = f - 0.5*(g**2)[:,None] * score_eval_wrapper(x, batch_time)
             return rhs.detach().numpy().reshape((-1,)).astype(np.float64)
   
-        # Run the RK solver
-        res = integrate.solve_ivp(ode_func, (self.T, self.eps), init_x.reshape(-1).cpu().numpy(), \
-                                  rtol=err_tol, atol=err_tol, method='RK45', dense_output=True)  
+        # Run the black-box ODE solver
+        res = integrate.solve_ivp(ode_func, (self.T, self.eps), init_x.reshape(-1).cpu().numpy(), rtol=err_tol, atol=err_tol, method='RK45')  
+        x = torch.tensor(res.y[:, -1], device=device).reshape(latents.shape)
         
-        x_shape = [latents.shape[0], latents.shape[1], len(res.t)]
-        x = torch.tensor(res.y, device=latents.device, dtype=torch.float32).reshape(x_shape)
-        return (res.t, x)
-     
+        return x
+
     def ODEsampler_fixedstep(self, score_net, latents, num_steps=100):
         batch_size = latents.shape[0]
 
@@ -101,7 +108,7 @@ class DiffusionModel:
                 drift = (-1.*f + 0.5*(g**2)[:,None]*sx)
                 x = x + dt * drift
         
-        return (time_steps, x)
+        return x
 
 class VP(DiffusionModel):
     def __init__(self):
@@ -157,7 +164,6 @@ class VE(DiffusionModel):
 
     def marginal_prob_std(self, t):
         """Compute the standard deviation of $p_{0:t}(x(t) | x(0))$.
-           The variance is given by \int_0^t g(s) ds.
         """    
         return torch.sqrt((self.sigma**(2 * t) - 1.) / 2. / np.log(self.sigma))
 
@@ -166,63 +172,30 @@ class VE(DiffusionModel):
         """
         return self.sigma**t
 
-class GMM_score(nn.Module):
-    '''
-        GMM score function which corresponds to the stationary point of the denoising score-matching loss function
-    '''
-    def __init__(self, train_data, marginal_prob_mean, marginal_prob_std):
+
+class GMM_score_rescaled(nn.Module):
+    def __init__(self, train_data, marginal_prob_std):
         super().__init__()
         self.train_data = train_data
-        self.marginal_prob_mean = marginal_prob_mean 
-        self.marginal_prob_std  = marginal_prob_std
+        self.marginal_prob_std = marginal_prob_std
 
-    def pdf_weights(self, x, t):
-        # compute mean and sigma
-        sigma = self.marginal_prob_std(t)
-        meanf = self.marginal_prob_mean(t)
-        # evaluate Gaussian densities
-        logpdf_x_yi = torch.zeros((x.shape[0],self.train_data.shape[0]))
-        for i in range(self.train_data.shape[0]):
-            logpdf_x_yi[:,i] = self.log_normal_pdf(x, meanf[:,None] * self.train_data[i,:], sigma)
-        # compute weighted average
-        weights = torch.softmax(logpdf_x_yi, axis=1)
-        return weights
-        
     def forward(self, x, t):
-        # compute weights
-        weights = self.pdf_weights(x, t)     
         # compute sigma
         sigma = self.marginal_prob_std(t)
-        # compute weighted average
-        evals = torch.mm(weights, self.train_data) 
+        # evaluate Gaussian densities
+        pdf_x_yi = torch.zeros((self.train_data.shape[0],x.shape[0]))
+        for i in range(self.train_data.shape[0]):
+            pdf_x_yi[i,:] = self.normal_pdf(self.train_data[i,:], x, sigma)
+        # compute weighted sum
+        evals = torch.sum(pdf_x_yi * self.train_data,axis=0) / torch.sum(pdf_x_yi,axis=0)
+        # correct values to be zero instead of nan
         evals[torch.isnan(evals)] = 0.0
-        return (evals - x)/(sigma[:, None]**2)
+        evals = evals.reshape((x.shape[0],1))
+        sigma2 = self.marginal_prob_std(t)**2
+        return (evals - x)/sigma2[:, None]
+        #return evals #(evals - x)/sigma.reshape(-1,1)))/sigma.reshape(-1,1)
 
-    def log_normal_pdf(self, x, y, sigma):
+    def normal_pdf(self, y, x, sigma):
         # ignoring normalization constant
         assert(x.shape[0] == len(sigma))
-        return -0.5*torch.sum((x - y)**2,axis=1)/sigma**2
-
-    def normal_pdf(self, x, y, sigma):
-        return torch.exp(self.log_normal_pdf(x, y, sigma))
-
-class GMM_score_regularized(GMM_score):
-    '''
-        GMM score function which corresponds to the stationary point of the regularized denoising
-        score-matching loss function using Tikonov regularization with parameter const*g(t)^2/sigma(t)^2
-    '''
-    def __init__(self, train_data, marginal_prob_mean, marginal_prob_std, diffusion_coeff, constant=1.0):
-        super().__init__(train_data, marginal_prob_mean, marginal_prob_std)
-        self.diffusion_coeff = diffusion_coeff
-        self.constant = constant
-        
-    def forward(self, x, t):
-        # compute weights
-        weights = self.pdf_weights(x, t)     
-        # compute sigma and diffusion coefficient
-        sigma = self.marginal_prob_std(t)
-        g = self.diffusion_coeff(t)
-        # compute weighted average
-        evals = torch.mm(weights, self.train_data) 
-        evals[torch.isnan(evals)] = 0.0
-        return (evals - x)/(sigma[:, None]**2 + self.constant * g[:, None]**2)
+        return torch.exp(-0.5*torch.sum((x - y)**2,axis=1)/sigma**2)

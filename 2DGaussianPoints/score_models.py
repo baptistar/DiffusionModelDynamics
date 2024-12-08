@@ -206,7 +206,7 @@ class GMM_score(nn.Module):
     def normal_pdf(self, x, y, sigma):
         return torch.exp(self.log_normal_pdf(x, y, sigma))
 
-class GMM_score_regularized(GMM_score):
+class GMM_score_TikhonovRegularized(GMM_score):
     '''
         GMM score function which corresponds to the stationary point of the regularized denoising
         score-matching loss function using Tikonov regularization with parameter const*g(t)^2/sigma(t)^2
@@ -226,3 +226,38 @@ class GMM_score_regularized(GMM_score):
         evals = torch.mm(weights, self.train_data) 
         evals[torch.isnan(evals)] = 0.0
         return (evals - x)/(sigma[:, None]**2 + self.constant * g[:, None]**2)
+
+class GMM_score_EmpiricalBayes(GMM_score):
+    '''
+        GMM score function which corresponds to the stationary point of the regularized denoising
+        score-matching loss function using Empirical Bayes regularization with parameter tau_const
+    '''
+    def __init__(self, train_data, marginal_prob_mean, marginal_prob_std, tau_constant=1.0):
+        super().__init__(train_data, marginal_prob_mean, marginal_prob_std)
+        self.tau_constant = tau_constant
+        
+    def pdf_weights(self, x, t):
+        # compute mean and sigma
+        sigma = self.marginal_prob_std(t)
+        meanf = self.marginal_prob_mean(t)
+        # evaluate Gaussian densities
+        logpdf_x_yi = torch.zeros((x.shape[0],self.train_data.shape[0]))
+        for i in range(self.train_data.shape[0]):
+            logpdf_x_yi[:,i] = self.log_normal_pdf(x, meanf[:,None] * self.train_data[i,:], sigma)
+        # compute regularized weighted average
+        log_denominator = torch.logsumexp(logpdf_x_yi, dim=1)
+        logtau = torch.log(torch.tensor(self.tau_constant))
+        reg_denominator = torch.max(log_denominator, logtau*torch.ones_like(log_denominator))
+        weights = torch.exp(logpdf_x_yi - reg_denominator[:,None])
+        return weights
+
+    def forward(self, x, t):
+        # compute weights
+        weights = self.pdf_weights(x, t)     
+        # compute sigma
+        sigma = self.marginal_prob_std(t)
+        # compute weighted average
+        evals = torch.mm(weights, self.train_data) 
+        evals -= torch.sum(weights,axis=1)[:,None] * x
+        evals[torch.isnan(evals)] = 0.0
+        return evals/(sigma[:, None]**2)

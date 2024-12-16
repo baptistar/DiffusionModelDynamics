@@ -45,14 +45,20 @@ class DiffusionModel:
 
         return x
 
-    def ODEsampler(self, score_net, latents, err_tol=1e-5):
+    def ODEsampler(self, score_net, latents, T0, T1, err_tol=1e-5):
         batch_size = latents.shape[0]
 
         # extract device
         device=latents.device
         
+        # set initial and final times
+        if T0 == None:
+            T0 = self.T
+        elif T1 == None:
+            T1 = self.eps
+
         # define initial samples
-        init_T = self.T * torch.ones(batch_size, device=latents.device)
+        init_T = T0 * torch.ones(batch_size, device=latents.device)
         init_x = latents * self.marginal_prob_std(init_T)[:, None]
 
         def score_eval_wrapper(sample, time_steps):
@@ -71,7 +77,7 @@ class DiffusionModel:
             return rhs.detach().numpy().reshape((-1,)).astype(np.float64)
   
         # Run the RK solver
-        res = integrate.solve_ivp(ode_func, (self.T, self.eps), init_x.reshape(-1).cpu().numpy(), \
+        res = integrate.solve_ivp(ode_func, (T0, T1), init_x.reshape(-1).cpu().numpy(), \
                                   rtol=err_tol, atol=err_tol, method='RK45', dense_output=True)  
         
         x_shape = [latents.shape[0], latents.shape[1], len(res.t)]

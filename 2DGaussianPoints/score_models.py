@@ -45,7 +45,7 @@ class DiffusionModel:
 
         return x
 
-    def ODEsampler(self, score_net, latents, T0, T1, err_tol=1e-5):
+    def ODEsampler(self, score_net, latents, T0=None, T1=None, err_tol=1e-5):
         batch_size = latents.shape[0]
 
         # extract device
@@ -78,7 +78,7 @@ class DiffusionModel:
   
         # Run the RK solver
         res = integrate.solve_ivp(ode_func, (T0, T1), init_x.reshape(-1).cpu().numpy(), \
-                                  rtol=err_tol, atol=err_tol, method='RK45', dense_output=True)  
+                                  rtol=err_tol, atol=err_tol, method='RK45', dense_output=True)
         
         x_shape = [latents.shape[0], latents.shape[1], len(res.t)]
         x = torch.tensor(res.y, device=latents.device, dtype=torch.float32).reshape(x_shape)

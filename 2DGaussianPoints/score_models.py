@@ -215,27 +215,6 @@ class GMM_score(nn.Module):
 class GMM_score_TikhonovRegularized(GMM_score):
     '''
         GMM score function which corresponds to the stationary point of the regularized denoising
-        score-matching loss function using Tikonov regularization with parameter const*g(t)^2/sigma(t)^2
-    '''
-    def __init__(self, train_data, marginal_prob_mean, marginal_prob_std, diffusion_coeff, constant=1.0):
-        super().__init__(train_data, marginal_prob_mean, marginal_prob_std)
-        self.diffusion_coeff = diffusion_coeff
-        self.constant = constant
-        
-    def forward(self, x, t):
-        # compute weights
-        weights = self.pdf_weights(x, t)     
-        # compute sigma and diffusion coefficient
-        sigma = self.marginal_prob_std(t)
-        g = self.diffusion_coeff(t)
-        # compute weighted average
-        evals = torch.mm(weights, self.train_data) 
-        evals[torch.isnan(evals)] = 0.0
-        return (evals - x)/(sigma[:, None]**2 + self.constant * g[:, None]**2)
-
-class GMM_score_TikhonovRegularizedTheory(GMM_score):
-    '''
-        GMM score function which corresponds to the stationary point of the regularized denoising
         score-matching loss function using Tikonov regularization with parameter const/sigma(t)^2
     '''
     def __init__(self, train_data, marginal_prob_mean, marginal_prob_std, diffusion_coeff, constant=1.0):

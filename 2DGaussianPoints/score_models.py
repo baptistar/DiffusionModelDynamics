@@ -64,7 +64,7 @@ class DiffusionModel:
         def score_eval_wrapper(sample, time_steps):
             """A wrapper of the score-based model for use by the ODE solver."""
             sample = torch.tensor(sample, device=device, dtype=torch.float32).reshape(latents.shape)
-            with torch.no_grad():    
+            with torch.no_grad():
                 score = score_net(sample, time_steps)
             return score
   
@@ -196,7 +196,7 @@ class GMM_score(nn.Module):
         
     def forward(self, x, t):
         # compute weights
-        weights = self.pdf_weights(x, t)     
+        weights = self.pdf_weights(x, t)
         # compute sigma
         sigma = self.marginal_prob_std(t)
         # compute weighted average
@@ -233,6 +233,27 @@ class GMM_score_TikhonovRegularized(GMM_score):
         evals[torch.isnan(evals)] = 0.0
         return (evals - x)/(sigma[:, None]**2 + self.constant * g[:, None]**2)
 
+class GMM_score_TikhonovRegularizedTheory(GMM_score):
+    '''
+        GMM score function which corresponds to the stationary point of the regularized denoising
+        score-matching loss function using Tikonov regularization with parameter const/sigma(t)^2
+    '''
+    def __init__(self, train_data, marginal_prob_mean, marginal_prob_std, diffusion_coeff, constant=1.0):
+        super().__init__(train_data, marginal_prob_mean, marginal_prob_std)
+        self.diffusion_coeff = diffusion_coeff
+        self.constant = torch.tensor([constant])
+        
+    def forward(self, x, t):
+        # compute weights
+        weights = self.pdf_weights(x, t)     
+        # compute sigma and diffusion coefficient
+        sigma = self.marginal_prob_std(t)
+        g = self.diffusion_coeff(t)
+        # compute weighted average
+        evals = torch.mm(weights, self.train_data) 
+        evals[torch.isnan(evals)] = 0.0
+        return (evals - x)/(sigma[:, None]**2 + self.constant)
+
 class GMM_score_EmpiricalBayes(GMM_score):
     '''
         GMM score function which corresponds to the stationary point of the regularized denoising
@@ -267,3 +288,44 @@ class GMM_score_EmpiricalBayes(GMM_score):
         evals -= torch.sum(weights,axis=1)[:,None] * x
         evals[torch.isnan(evals)] = 0.0
         return evals/(sigma[:, None]**2)
+
+class GMM_scoreVP(nn.Module):
+    '''
+        GMM score function which corresponds to the stationary point of the denoising score-matching loss function
+    '''
+    def __init__(self, train_data, marginal_prob_mean, marginal_prob_std):
+        super().__init__()
+        self.train_data = train_data
+        self.marginal_prob_mean = marginal_prob_mean 
+        self.marginal_prob_std  = marginal_prob_std
+
+    def pdf_weights(self, x, t):
+        # compute mean and sigma
+        sigma = self.marginal_prob_std(t)
+        meanf = self.marginal_prob_mean(t)
+        # evaluate Gaussian densities
+        logpdf_x_yi = torch.zeros((x.shape[0],self.train_data.shape[0]))
+        for i in range(self.train_data.shape[0]):
+            logpdf_x_yi[:,i] = self.log_normal_pdf(x, meanf[:,None] * self.train_data[i,:], sigma)
+        # compute weighted average
+        weights = torch.softmax(logpdf_x_yi, axis=1)
+        return weights
+        
+    def forward(self, x, t):
+        # compute weights
+        weights = self.pdf_weights(x, t)
+        # compute sigma
+        sigma = self.marginal_prob_std(t)
+        # compute weighted average
+        evals = self.marginal_prob_mean(t)[:,None] * torch.mm(weights, self.train_data)
+        evals[torch.isnan(evals)] = 0.0
+        return (evals - x)/(sigma[:, None]**2)
+
+    def log_normal_pdf(self, x, y, sigma):
+        # ignoring normalization constant
+        assert(x.shape[0] == len(sigma))
+        return -0.5*torch.sum((x - y)**2,axis=1)/sigma**2
+
+    def normal_pdf(self, x, y, sigma):
+        return torch.exp(self.log_normal_pdf(x, y, sigma))
+
